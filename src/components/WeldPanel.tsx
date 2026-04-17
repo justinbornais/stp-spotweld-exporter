@@ -14,6 +14,8 @@ export const WeldPanel: React.FC = () => {
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState('');
+  const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
   const dragItemRef = useRef<number | null>(null);
   const dragOverItemRef = useRef<number | null>(null);
 
@@ -31,18 +33,26 @@ export const WeldPanel: React.FC = () => {
 
   const handleDragStart = (index: number) => {
     dragItemRef.current = index;
+    setDraggingIndex(index);
   };
 
   const handleDragEnter = (index: number) => {
     dragOverItemRef.current = index;
+    setDropIndex(index);
+  };
+
+  const handleDragLeave = () => {
+    setDropIndex(null);
   };
 
   const handleDragEnd = () => {
-    if (dragItemRef.current !== null && dragOverItemRef.current !== null) {
+    if (dragItemRef.current !== null && dragOverItemRef.current !== null && dragItemRef.current !== dragOverItemRef.current) {
       reorderWelds(dragItemRef.current, dragOverItemRef.current);
     }
     dragItemRef.current = null;
     dragOverItemRef.current = null;
+    setDraggingIndex(null);
+    setDropIndex(null);
   };
 
   const exportJSON = useCallback(() => {
@@ -95,15 +105,17 @@ export const WeldPanel: React.FC = () => {
         {welds.map((weld, index) => (
           <div
             key={weld.id}
-            className={`weld-item ${weld.id === selectedWeldId ? 'selected' : ''}`}
+            className={`weld-item ${weld.id === selectedWeldId ? 'selected' : ''} ${draggingIndex === index ? 'dragging' : ''} ${dropIndex === index ? 'drop-target' : ''}`}
             onClick={() => setSelectedWeldId(weld.id)}
             draggable
             onDragStart={() => handleDragStart(index)}
             onDragEnter={() => handleDragEnter(index)}
+            onDragLeave={handleDragLeave}
             onDragEnd={handleDragEnd}
             onDragOver={(e) => e.preventDefault()}
           >
             <div className="weld-item-header">
+              <span className="weld-drag-handle" title="Drag to reorder">⋮⋮</span>
               <span className="weld-seq">{weld.sequence}</span>
               {editingId === weld.id ? (
                 <input
