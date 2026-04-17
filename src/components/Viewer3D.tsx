@@ -14,6 +14,7 @@ export const Viewer3D: React.FC = () => {
   const weldMarkersRef = useRef<THREE.Group | null>(null);
   const raycasterRef = useRef(new THREE.Raycaster());
   const mouseRef = useRef(new THREE.Vector2());
+  const mouseDownRef = useRef(new THREE.Vector2());
   const highlightedRef = useRef<THREE.Mesh | null>(null);
   const originalMaterialsRef = useRef<Map<string, THREE.Material>>(new Map());
 
@@ -258,9 +259,22 @@ export const Viewer3D: React.FC = () => {
       if (!containerRef.current || !cameraRef.current || !sceneRef.current) return;
 
       const rect = containerRef.current.getBoundingClientRect();
-      mouseRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-      mouseRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      const currentPos = new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1
+      );
 
+      // Check if this was a drag (mouse moved more than threshold)
+      const dragThreshold = 0.05; // Normalized coords threshold (~5-10 pixels typically)
+      const dragDistance = currentPos.distanceTo(mouseDownRef.current);
+      const isDrag = dragDistance > dragThreshold;
+
+      if (isDrag) {
+        // This was a drag, not a click - don't place weld
+        return;
+      }
+
+      mouseRef.current.copy(currentPos);
       raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current);
 
       // First, check if a weld marker was clicked
@@ -315,6 +329,17 @@ export const Viewer3D: React.FC = () => {
     },
     [mode, addWeld, nextWeldNumber, welds.length, setSelectedWeldId]
   );
+
+  // Track mouse down position to distinguish clicks from drags
+  const handleMouseDown = useCallback((event: React.MouseEvent) => {
+    if (!containerRef.current) return;
+
+    const rect = containerRef.current.getBoundingClientRect();
+    mouseDownRef.current.set(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1
+    );
+  }, []);
 
   // Hover highlight
   const handleMouseMove = useCallback(
@@ -375,6 +400,7 @@ export const Viewer3D: React.FC = () => {
       ref={containerRef}
       className="viewer-3d"
       onClick={handleClick}
+      onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
     />
   );
