@@ -1,4 +1,5 @@
 import type { ParsedCADModel, ParsedMesh, FaceRange } from './types';
+import occtWasmUrl from './assets/occt-import-js.wasm?url';
 
 export interface OcctResult {
   success: boolean;
@@ -56,7 +57,7 @@ async function getOcctModule(): Promise<any> {
   occtModule = await factory({
     locateFile: (name: string) => {
       if (name.endsWith('.wasm')) {
-        return '/occt-import-js.wasm';
+        return occtWasmUrl;
       }
       return name;
     },
