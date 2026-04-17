@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useCallback, useMemo } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { useAppStore } from '../store';
-import type { ParsedMesh } from '../types';
+import type { ParsedMesh, WeldPathStyle, WeldPoint } from '../types';
 
 const getWeldIdFromObject = (object: THREE.Object3D | null) => {
   let current = object;
@@ -46,6 +46,121 @@ const stopPointerEvent = (event: React.PointerEvent<HTMLDivElement>) => {
   event.nativeEvent.stopImmediatePropagation();
 };
 
+const toVector3 = (coords: [number, number, number]) =>
+  new THREE.Vector3(coords[0], coords[1], coords[2]);
+
+const getOutwardNormal = (
+  weld: WeldPoint,
+  point: THREE.Vector3,
+  modelCenter: THREE.Vector3
+) => {
+  const normal = toVector3(weld.normal);
+  if (normal.lengthSq() === 0) {
+    normal.copy(point).sub(modelCenter);
+  }
+  if (normal.lengthSq() === 0) {
+    normal.set(0, 1, 0);
+  }
+
+  normal.normalize();
+  return normal;
+};
+
+const segmentIntersectsModel = (
+  start: THREE.Vector3,
+  end: THREE.Vector3,
+  meshGroup: THREE.Group,
+  epsilon: number
+) => {
+  const delta = end.clone().sub(start);
+  const length = delta.length();
+  if (length <= epsilon * 2) return false;
+
+  const raycaster = new THREE.Raycaster(
+    start,
+    delta.normalize(),
+    epsilon,
+    length - epsilon
+  );
+
+  return raycaster
+    .intersectObjects(meshGroup.children, true)
+    .some((hit) => hit.distance > epsilon && hit.distance < length - epsilon);
+};
+
+const pathIntersectsModel = (
+  points: THREE.Vector3[],
+  meshGroup: THREE.Group,
+  epsilon: number
+) => {
+  for (let i = 0; i < points.length - 1; i += 1) {
+    if (segmentIntersectsModel(points[i], points[i + 1], meshGroup, epsilon)) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const getCurvedPathSamples = (points: THREE.Vector3[]) => {
+  if (points.length < 2) return points;
+  if (points.length === 2) {
+    return new THREE.LineCurve3(points[0], points[1]).getPoints(12);
+  }
+  return new THREE.CatmullRomCurve3(
+    points,
+    false,
+    'centripetal'
+  ).getPoints(32);
+};
+
+const getAvoidingSegmentPoints = (
+  startWeld: WeldPoint,
+  endWeld: WeldPoint,
+  meshGroup: THREE.Group,
+  modelCenter: THREE.Vector3,
+  baseClearance: number,
+  epsilon: number,
+  pathStyle: WeldPathStyle
+) => {
+  const start = toVector3(startWeld.position);
+  const end = toVector3(endWeld.position);
+  const directPath = [start, end];
+
+  const startNormal = getOutwardNormal(startWeld, start, modelCenter);
+  const endNormal = getOutwardNormal(endWeld, end, modelCenter);
+  const midpoint = start.clone().lerp(end, 0.5);
+  let bridgeNormal = startNormal.clone().add(endNormal);
+
+  if (bridgeNormal.lengthSq() === 0) {
+    bridgeNormal = midpoint.clone().sub(modelCenter);
+  }
+  if (bridgeNormal.lengthSq() === 0) {
+    bridgeNormal.copy(startNormal);
+  }
+  bridgeNormal.normalize();
+
+  let fallbackPath = directPath;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const clearance = baseClearance * Math.pow(1.55, attempt);
+    const liftedPath = [
+      start,
+      start.clone().addScaledVector(startNormal, clearance),
+      midpoint.clone().addScaledVector(bridgeNormal, clearance * 1.6),
+      end.clone().addScaledVector(endNormal, clearance),
+      end,
+    ];
+    const testPoints =
+      pathStyle === 'curved' ? getCurvedPathSamples(liftedPath) : liftedPath;
+
+    fallbackPath = liftedPath;
+    if (!pathIntersectsModel(testPoints, meshGroup, epsilon)) {
+      return liftedPath;
+    }
+  }
+
+  return fallbackPath;
+};
+
 export const Viewer3D: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -54,6 +169,7 @@ export const Viewer3D: React.FC = () => {
   const controlsRef = useRef<OrbitControls | null>(null);
   const meshGroupRef = useRef<THREE.Group | null>(null);
   const weldMarkersRef = useRef<THREE.Group | null>(null);
+  const weldPathRef = useRef<THREE.Group | null>(null);
   const raycasterRef = useRef(new THREE.Raycaster());
   const mouseRef = useRef(new THREE.Vector2());
   const mouseDownRef = useRef(new THREE.Vector2());
@@ -79,6 +195,8 @@ export const Viewer3D: React.FC = () => {
   const selectedWeldId = useAppStore((s) => s.selectedWeldId);
   const setSelectedWeldId = useAppStore((s) => s.setSelectedWeldId);
   const nextWeldNumber = useAppStore((s) => s.nextWeldNumber);
+  const showWeldPath = useAppStore((s) => s.showWeldPath);
+  const weldPathStyle = useAppStore((s) => s.weldPathStyle);
 
   const setMouseFromClient = useCallback((clientX: number, clientY: number) => {
     if (!containerRef.current) return false;
@@ -233,6 +351,11 @@ export const Viewer3D: React.FC = () => {
     scene.add(weldMarkers);
     weldMarkersRef.current = weldMarkers;
 
+    // Weld path group
+    const weldPath = new THREE.Group();
+    scene.add(weldPath);
+    weldPathRef.current = weldPath;
+
     // Animation loop
     let animId: number;
     const animate = () => {
@@ -376,6 +499,78 @@ export const Viewer3D: React.FC = () => {
       markers.add(sprite);
     });
   }, [welds, selectedWeldId]);
+
+  // Update traced weld path
+  useEffect(() => {
+    const pathGroup = weldPathRef.current;
+    const meshGroup = meshGroupRef.current;
+    if (!pathGroup) return;
+
+    while (pathGroup.children.length > 0) {
+      const pathObject = pathGroup.children[0];
+      pathGroup.remove(pathObject);
+      disposeObjectResources(pathObject);
+    }
+
+    if (!showWeldPath || welds.length < 2 || !meshGroup) return;
+
+    const box = new THREE.Box3().setFromObject(meshGroup);
+    const modelCenter = box.getCenter(new THREE.Vector3());
+    const modelSize = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(modelSize.x, modelSize.y, modelSize.z);
+    if (!Number.isFinite(maxDim) || maxDim <= 0) return;
+
+    const baseClearance = maxDim * 0.05;
+    const epsilon = maxDim * 0.002;
+    const tubeRadius = maxDim * 0.0035;
+    const curvePath = new THREE.CurvePath<THREE.Vector3>();
+
+    for (let i = 0; i < welds.length - 1; i += 1) {
+      const segmentPoints = getAvoidingSegmentPoints(
+        welds[i],
+        welds[i + 1],
+        meshGroup,
+        modelCenter,
+        baseClearance,
+        epsilon,
+        weldPathStyle
+      );
+
+      if (weldPathStyle === 'curved') {
+        curvePath.add(
+          new THREE.CatmullRomCurve3(segmentPoints, false, 'centripetal')
+        );
+      } else {
+        for (let j = 0; j < segmentPoints.length - 1; j += 1) {
+          curvePath.add(
+            new THREE.LineCurve3(segmentPoints[j], segmentPoints[j + 1])
+          );
+        }
+      }
+    }
+
+    if (curvePath.curves.length === 0) return;
+
+    const tubularSegments = Math.max(
+      32,
+      curvePath.curves.length * (weldPathStyle === 'curved' ? 32 : 8)
+    );
+    const geometry = new THREE.TubeGeometry(
+      curvePath,
+      tubularSegments,
+      tubeRadius,
+      8,
+      false
+    );
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x2dd4bf,
+      transparent: true,
+      opacity: 0.9,
+      depthTest: true,
+    });
+    const pathMesh = new THREE.Mesh(geometry, material);
+    pathGroup.add(pathMesh);
+  }, [welds, showWeldPath, weldPathStyle, threeMeshes]);
 
   // Click handler for weld placement / selection
   const handleClick = useCallback(

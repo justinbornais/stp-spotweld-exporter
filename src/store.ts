@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { WeldPoint, ParsedCADModel, AppMode } from './types';
+import type { WeldPoint, ParsedCADModel, AppMode, WeldPathStyle } from './types';
 
 interface AppState {
   // App mode
@@ -21,6 +21,10 @@ interface AppState {
   updateWeld: (id: string, updates: Partial<WeldPoint>) => void;
   reorderWelds: (fromIndex: number, toIndex: number) => void;
   clearWelds: () => void;
+  showWeldPath: boolean;
+  setShowWeldPath: (show: boolean) => void;
+  weldPathStyle: WeldPathStyle;
+  setWeldPathStyle: (style: WeldPathStyle) => void;
 
   // Selection
   selectedWeldId: string | null;
@@ -75,6 +79,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
     }),
   clearWelds: () => set({ welds: [], nextWeldNumber: 1, selectedWeldId: null }),
+  showWeldPath: false,
+  setShowWeldPath: (showWeldPath) => set({ showWeldPath }),
+  weldPathStyle: 'linear',
+  setWeldPathStyle: (weldPathStyle) => set({ weldPathStyle }),
 
   selectedWeldId: null,
   setSelectedWeldId: (id) => set({ selectedWeldId: id }),

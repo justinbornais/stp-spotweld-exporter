@@ -41,4 +41,6 @@ export interface ExportData {
   }[];
 }
 
+export type WeldPathStyle = 'linear' | 'curved';
+
 export type AppMode = 'upload' | 'view' | 'select' | 'sequence';

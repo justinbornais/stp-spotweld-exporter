@@ -11,6 +11,10 @@ export const WeldPanel: React.FC = () => {
   const setSelectedWeldId = useAppStore((s) => s.setSelectedWeldId);
   const mode = useAppStore((s) => s.mode);
   const setMode = useAppStore((s) => s.setMode);
+  const showWeldPath = useAppStore((s) => s.showWeldPath);
+  const setShowWeldPath = useAppStore((s) => s.setShowWeldPath);
+  const weldPathStyle = useAppStore((s) => s.weldPathStyle);
+  const setWeldPathStyle = useAppStore((s) => s.setWeldPathStyle);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState('');
@@ -90,6 +94,33 @@ export const WeldPanel: React.FC = () => {
             title="Toggle weld placement mode"
           >
             {mode === 'select' ? '✋ Stop Selecting' : '📌 Place Welds'}
+          </button>
+        </div>
+      </div>
+
+      <div className="path-options">
+        <label className="path-toggle">
+          <input
+            type="checkbox"
+            checked={showWeldPath}
+            onChange={(e) => setShowWeldPath(e.target.checked)}
+          />
+          <span>Trace weld path</span>
+        </label>
+        <div className="path-style-toggle" aria-label="Weld path style">
+          <button
+            className={`path-style-btn ${weldPathStyle === 'linear' ? 'active' : ''}`}
+            onClick={() => setWeldPathStyle('linear')}
+            disabled={!showWeldPath}
+          >
+            Linear
+          </button>
+          <button
+            className={`path-style-btn ${weldPathStyle === 'curved' ? 'active' : ''}`}
+            onClick={() => setWeldPathStyle('curved')}
+            disabled={!showWeldPath}
+          >
+            Curved
           </button>
         </div>
       </div>
