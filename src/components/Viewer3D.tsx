@@ -4,6 +4,48 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { useAppStore } from '../store';
 import type { ParsedMesh } from '../types';
 
+const getWeldIdFromObject = (object: THREE.Object3D | null) => {
+  let current = object;
+  while (current) {
+    if (typeof current.userData.weldId === 'string') {
+      return current.userData.weldId;
+    }
+    current = current.parent;
+  }
+  return null;
+};
+
+const disposeObjectResources = (object: THREE.Object3D) => {
+  object.traverse((child) => {
+    const renderable = child as THREE.Object3D & {
+      geometry?: THREE.BufferGeometry;
+      material?: THREE.Material | THREE.Material[];
+    };
+
+    renderable.geometry?.dispose();
+
+    const materials = Array.isArray(renderable.material)
+      ? renderable.material
+      : renderable.material
+        ? [renderable.material]
+        : [];
+
+    materials.forEach((material) => {
+      const mappedMaterial = material as THREE.Material & {
+        map?: THREE.Texture;
+      };
+      mappedMaterial.map?.dispose();
+      material.dispose();
+    });
+  });
+};
+
+const stopPointerEvent = (event: React.PointerEvent<HTMLDivElement>) => {
+  event.preventDefault();
+  event.stopPropagation();
+  event.nativeEvent.stopImmediatePropagation();
+};
+
 export const Viewer3D: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -15,6 +57,17 @@ export const Viewer3D: React.FC = () => {
   const raycasterRef = useRef(new THREE.Raycaster());
   const mouseRef = useRef(new THREE.Vector2());
   const mouseDownRef = useRef(new THREE.Vector2());
+  const pointerDownClientRef = useRef(new THREE.Vector2());
+  const dragStateRef = useRef<{
+    weldId: string | null;
+    pointerId: number | null;
+    isDragging: boolean;
+  }>({
+    weldId: null,
+    pointerId: null,
+    isDragging: false,
+  });
+  const suppressNextClickRef = useRef(false);
   const highlightedRef = useRef<THREE.Mesh | null>(null);
   const originalMaterialsRef = useRef<Map<string, THREE.Material>>(new Map());
 
@@ -22,9 +75,76 @@ export const Viewer3D: React.FC = () => {
   const mode = useAppStore((s) => s.mode);
   const welds = useAppStore((s) => s.welds);
   const addWeld = useAppStore((s) => s.addWeld);
+  const updateWeld = useAppStore((s) => s.updateWeld);
   const selectedWeldId = useAppStore((s) => s.selectedWeldId);
   const setSelectedWeldId = useAppStore((s) => s.setSelectedWeldId);
   const nextWeldNumber = useAppStore((s) => s.nextWeldNumber);
+
+  const setMouseFromClient = useCallback((clientX: number, clientY: number) => {
+    if (!containerRef.current) return false;
+
+    const rect = containerRef.current.getBoundingClientRect();
+    mouseRef.current.set(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+    return true;
+  }, []);
+
+  const findWeldHit = useCallback((clientX: number, clientY: number) => {
+    if (
+      !cameraRef.current ||
+      !weldMarkersRef.current ||
+      !setMouseFromClient(clientX, clientY)
+    ) {
+      return null;
+    }
+
+    raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current);
+    const weldIntersects = raycasterRef.current.intersectObjects(
+      weldMarkersRef.current.children,
+      true
+    );
+
+    for (const hit of weldIntersects) {
+      const weldId = getWeldIdFromObject(hit.object);
+      if (weldId) {
+        return weldId;
+      }
+    }
+
+    return null;
+  }, [setMouseFromClient]);
+
+  const findSurfaceHit = useCallback((clientX: number, clientY: number) => {
+    if (
+      !cameraRef.current ||
+      !meshGroupRef.current ||
+      !setMouseFromClient(clientX, clientY)
+    ) {
+      return null;
+    }
+
+    raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current);
+    const intersects = raycasterRef.current.intersectObjects(
+      meshGroupRef.current.children,
+      true
+    );
+
+    return intersects[0] ?? null;
+  }, [setMouseFromClient]);
+
+  const resetHighlightedMesh = useCallback(() => {
+    if (!highlightedRef.current) return;
+
+    const origMat = originalMaterialsRef.current.get(
+      highlightedRef.current.uuid
+    );
+    if (origMat) {
+      highlightedRef.current.material = origMat;
+    }
+    highlightedRef.current = null;
+  }, []);
 
   // Build Three.js meshes from parsed model
   const threeMeshes = useMemo(() => {
@@ -188,7 +308,9 @@ export const Viewer3D: React.FC = () => {
     if (!markers) return;
 
     while (markers.children.length > 0) {
-      markers.remove(markers.children[0]);
+      const marker = markers.children[0];
+      markers.remove(marker);
+      disposeObjectResources(marker);
     }
 
     const model3d = meshGroupRef.current;
@@ -224,6 +346,7 @@ export const Viewer3D: React.FC = () => {
         arrowLen * 0.3,
         arrowLen * 0.15
       );
+      arrowHelper.userData.weldId = weld.id;
       markers.add(arrowHelper);
 
       // Sequence label (as a sprite)
@@ -249,6 +372,7 @@ export const Viewer3D: React.FC = () => {
         weld.position[2] + dir.z * arrowLen * 1.3
       );
       sprite.scale.set(markerScale * 2, markerScale * 2, 1);
+      sprite.userData.weldId = weld.id;
       markers.add(sprite);
     });
   }, [welds, selectedWeldId]);
@@ -257,6 +381,11 @@ export const Viewer3D: React.FC = () => {
   const handleClick = useCallback(
     (event: React.MouseEvent) => {
       if (!containerRef.current || !cameraRef.current || !sceneRef.current) return;
+
+      if (suppressNextClickRef.current) {
+        suppressNextClickRef.current = false;
+        return;
+      }
 
       const rect = containerRef.current.getBoundingClientRect();
       const currentPos = new THREE.Vector2(
@@ -278,32 +407,16 @@ export const Viewer3D: React.FC = () => {
       raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current);
 
       // First, check if a weld marker was clicked
-      if (weldMarkersRef.current) {
-        const weldIntersects = raycasterRef.current.intersectObjects(
-          weldMarkersRef.current.children,
-          true
-        );
-        for (const hit of weldIntersects) {
-          let obj: THREE.Object3D | null = hit.object;
-          while (obj) {
-            if (obj.userData.weldId) {
-              setSelectedWeldId(obj.userData.weldId);
-              return;
-            }
-            obj = obj.parent;
-          }
-        }
+      const weldId = findWeldHit(event.clientX, event.clientY);
+      if (weldId) {
+        setSelectedWeldId(weldId);
+        return;
       }
 
       // If in select mode, place a weld on the clicked face
-      if (mode === 'select' && meshGroupRef.current) {
-        const intersects = raycasterRef.current.intersectObjects(
-          meshGroupRef.current.children,
-          true
-        );
-
-        if (intersects.length > 0) {
-          const hit = intersects[0];
+      if (mode === 'select') {
+        const hit = findSurfaceHit(event.clientX, event.clientY);
+        if (hit) {
           const point = hit.point;
           const face = hit.face;
 
@@ -327,34 +440,114 @@ export const Viewer3D: React.FC = () => {
         }
       }
     },
-    [mode, addWeld, nextWeldNumber, welds.length, setSelectedWeldId]
+    [
+      mode,
+      addWeld,
+      nextWeldNumber,
+      welds.length,
+      setSelectedWeldId,
+      findWeldHit,
+      findSurfaceHit,
+    ]
   );
 
-  // Track mouse down position to distinguish clicks from drags
-  const handleMouseDown = useCallback((event: React.MouseEvent) => {
-    if (!containerRef.current) return;
+  const handlePointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (!containerRef.current) return;
 
-    const rect = containerRef.current.getBoundingClientRect();
-    mouseDownRef.current.set(
-      ((event.clientX - rect.left) / rect.width) * 2 - 1,
-      -((event.clientY - rect.top) / rect.height) * 2 + 1
-    );
-  }, []);
+      const rect = containerRef.current.getBoundingClientRect();
+      mouseDownRef.current.set(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      pointerDownClientRef.current.set(event.clientX, event.clientY);
+
+      const weldId = findWeldHit(event.clientX, event.clientY);
+      if (!weldId) {
+        dragStateRef.current = {
+          weldId: null,
+          pointerId: null,
+          isDragging: false,
+        };
+        return;
+      }
+
+      stopPointerEvent(event);
+      setSelectedWeldId(weldId);
+      dragStateRef.current = {
+        weldId,
+        pointerId: event.pointerId,
+        isDragging: false,
+      };
+      if (controlsRef.current) {
+        controlsRef.current.enabled = false;
+      }
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {
+        // Some browsers may reject capture if another control already owns it.
+      }
+      event.currentTarget.style.cursor = 'grab';
+    },
+    [findWeldHit, setSelectedWeldId]
+  );
 
   // Hover highlight
-  const handleMouseMove = useCallback(
-    (event: React.MouseEvent) => {
+  const handlePointerMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const dragState = dragStateRef.current;
+      if (dragState.weldId && dragState.pointerId === event.pointerId) {
+        stopPointerEvent(event);
+        resetHighlightedMesh();
+
+        const dragDistance = pointerDownClientRef.current.distanceTo(
+          new THREE.Vector2(event.clientX, event.clientY)
+        );
+
+        if (!dragState.isDragging && dragDistance < 4) {
+          event.currentTarget.style.cursor = 'grab';
+          return;
+        }
+
+        dragState.isDragging = true;
+        suppressNextClickRef.current = true;
+        event.currentTarget.style.cursor = 'grabbing';
+
+        const hit = findSurfaceHit(event.clientX, event.clientY);
+        if (hit?.face) {
+          const normal = hit.face.normal.clone();
+          const mesh = hit.object as THREE.Mesh;
+          normal.transformDirection(mesh.matrixWorld).normalize();
+
+          updateWeld(dragState.weldId, {
+            position: [hit.point.x, hit.point.y, hit.point.z],
+            normal: [normal.x, normal.y, normal.z],
+            faceIndex: hit.faceIndex ?? undefined,
+          });
+        }
+        return;
+      }
+
       if (
         !containerRef.current ||
         !cameraRef.current ||
-        mode !== 'select' ||
         !meshGroupRef.current
       )
         return;
 
-      const rect = containerRef.current.getBoundingClientRect();
-      mouseRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-      mouseRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      if (findWeldHit(event.clientX, event.clientY)) {
+        resetHighlightedMesh();
+        containerRef.current.style.cursor = 'grab';
+        return;
+      }
+
+      if (mode !== 'select') {
+        resetHighlightedMesh();
+        containerRef.current.style.cursor = 'default';
+        return;
+      }
+
+      if (!setMouseFromClient(event.clientX, event.clientY)) return;
 
       raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current);
 
@@ -364,15 +557,7 @@ export const Viewer3D: React.FC = () => {
       );
 
       // Reset previous highlight
-      if (highlightedRef.current) {
-        const origMat = originalMaterialsRef.current.get(
-          highlightedRef.current.uuid
-        );
-        if (origMat) {
-          highlightedRef.current.material = origMat;
-        }
-        highlightedRef.current = null;
-      }
+      resetHighlightedMesh();
 
       if (intersects.length > 0) {
         const mesh = intersects[0].object as THREE.Mesh;
@@ -392,16 +577,60 @@ export const Viewer3D: React.FC = () => {
         containerRef.current.style.cursor = 'default';
       }
     },
-    [mode]
+    [
+      mode,
+      findSurfaceHit,
+      findWeldHit,
+      resetHighlightedMesh,
+      setMouseFromClient,
+      updateWeld,
+    ]
   );
+
+  const handlePointerUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const dragState = dragStateRef.current;
+    if (dragState.pointerId !== event.pointerId) return;
+
+    stopPointerEvent(event);
+
+    if (dragState.isDragging) {
+      suppressNextClickRef.current = true;
+    }
+
+    dragStateRef.current = {
+      weldId: null,
+      pointerId: null,
+      isDragging: false,
+    };
+    if (controlsRef.current) {
+      controlsRef.current.enabled = true;
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    event.currentTarget.style.cursor = 'default';
+  }, []);
+
+  const handlePointerLeave = useCallback(() => {
+    if (dragStateRef.current.weldId) return;
+
+    resetHighlightedMesh();
+    if (containerRef.current) {
+      containerRef.current.style.cursor = 'default';
+    }
+  }, [resetHighlightedMesh]);
 
   return (
     <div
       ref={containerRef}
       className="viewer-3d"
       onClick={handleClick}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
+      onPointerDownCapture={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onPointerLeave={handlePointerLeave}
     />
   );
 };
