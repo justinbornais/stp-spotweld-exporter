@@ -18,7 +18,7 @@ export const Toolbar: React.FC = () => {
   return (
     <div className="toolbar">
       <div className="toolbar-left">
-        <span className="toolbar-title">Weld Inspector</span>
+        <span className="toolbar-title">Weld Identifier</span>
         <span className="toolbar-file" title={model.fileName}>
           {model.fileName}
         </span>
