@@ -189,6 +189,7 @@ export const Viewer3D: React.FC = () => {
 
   const model = useAppStore((s) => s.model);
   const mode = useAppStore((s) => s.mode);
+  const setMode = useAppStore((s) => s.setMode);
   const welds = useAppStore((s) => s.welds);
   const addWeld = useAppStore((s) => s.addWeld);
   const updateWeld = useAppStore((s) => s.updateWeld);
@@ -293,6 +294,17 @@ export const Viewer3D: React.FC = () => {
       return mesh;
     });
   }, [model]);
+
+  // Escape key exits select mode
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && useAppStore.getState().mode === 'select') {
+        setMode('view');
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [setMode]);
 
   // Initialize Three.js scene
   useEffect(() => {
@@ -605,6 +617,12 @@ export const Viewer3D: React.FC = () => {
       const weldId = findWeldHit(event.clientX, event.clientY);
       if (weldId) {
         setSelectedWeldId(weldId);
+        return;
+      }
+
+      // In view mode, clicking anywhere that isn't a weld deselects
+      if (mode === 'view') {
+        setSelectedWeldId(null);
         return;
       }
 
